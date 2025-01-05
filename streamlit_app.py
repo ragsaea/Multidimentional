@@ -1,66 +1,104 @@
-import altair as alt
 import pandas as pd
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder
+import pyodbc
 
-# Show the page title and description.
-st.set_page_config(page_title="Movies dataset", page_icon="🎬")
-st.title("🎬 Movies dataset")
+
+# Set page title and description
+st.set_page_config(page_title="Movies Dataset", page_icon="🎬")
+st.title("🎬 Movies Dataset")
 st.write(
     """
-    This app visualizes data from [The Movie Database (TMDB)](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata).
-    It shows which movie genre performed best at the box office over the years. Just 
-    click on the widgets below to explore!
+    This app visualizes data from a SQL Server datamart interactively using a grid interface.
+    Use the widgets below to filter and customize your view!
     """
 )
 
+# SQL Server connection function
+def connect_to_sql_server():
+    connection_string = (
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        "SERVER=10.101.3.55;"  # e.g., "localhost" or "192.168.1.100"
+        "DATABASE=AWIBI_DM;"
+        "UID=Scriptcase;"
+        "PWD=Scriptcase;"
+    )
+    return pyodbc.connect(connection_string)
 
-# Load the data from a CSV. We're caching this so it doesn't reload every time the app
-# reruns (e.g. if the user interacts with the widgets).
+# Fetch data from the SQL Server datamart
 @st.cache_data
-def load_data():
-    df = pd.read_csv("data/movies_genres_summary.csv")
+def fetch_data(query):
+    conn = connect_to_sql_server()
+    df = pd.read_sql(query, conn)
+    conn.close()
     return df
 
+# Define the query to fetch data
+query = "SELECT TOP 1000 * FROM ecommerce"
 
-df = load_data()
+# Display data in the app
+try:
+    df = fetch_data(query)
+    st.write("Data from SQL Server:")
+    st.dataframe(df)
+except Exception as e:
+    st.error(f"Error connecting to SQL Server: {e}")
+    st.stop()
 
-# Show a multiselect widget with the genres using `st.multiselect`.
-genres = st.multiselect(
-    "Genres",
-    df.genre.unique(),
-    ["Action", "Adventure", "Biography", "Comedy", "Drama", "Horror"],
+# Widgets for filtering
+ecommerce_options = df["ecommerce"].unique().tolist()
+ecommerce = st.multiselect(
+    "E-commerce Platform",
+    ecommerce_options,
+    default=["LAZADA", "SHOPEE"],
 )
 
-# Show a slider widget with the years using `st.slider`.
-years = st.slider("Years", 1986, 2006, (2000, 2016))
+year_min, year_max = int(df["year"].min()), int(df["year"].max())
+year = st.slider("Year", year_min, year_max, (year_max - 1, year_max))
 
-# Filter the dataframe based on the widget input and reshape it.
-df_filtered = df[(df["genre"].isin(genres)) & (df["year"].between(years[0], years[1]))]
-df_reshaped = df_filtered.pivot_table(
-    index="year", columns="genre", values="gross", aggfunc="sum", fill_value=0
-)
-df_reshaped = df_reshaped.sort_values(by="year", ascending=False)
+# Filter the data based on widget input
+df_filtered = df[(df["ecommerce"].isin(ecommerce)) & (df["year"].between(year[0], year[1]))]
 
+# Widget for pivot customization
+st.write("### Customize Pivot Table")
+rows = st.multiselect("Select Rows", df_filtered.columns, default=["year"])
+columns = st.multiselect("Select Columns", df_filtered.columns, default=["ecommerce"])
+values = st.selectbox("Select Values", df_filtered.columns, index=list(df_filtered.columns).index("qty"))
+aggfunc = st.selectbox("Aggregation Function", ["sum", "mean", "count", "max", "min"])
 
-# Display the data as a table using `st.dataframe`.
-st.dataframe(
-    df_reshaped,
-    use_container_width=True,
-    column_config={"year": st.column_config.TextColumn("Year")},
+# Create the pivot table
+if rows and columns and values:
+    pivot_table = df_filtered.pivot_table(
+        index=rows,
+        columns=columns,
+        values=values,
+        aggfunc=aggfunc,
+        fill_value=0,
+    ).reset_index()
+else:
+    pivot_table = df_filtered  # Default to filtered data if no pivot is defined
+
+# Display the grid using Ag-Grid
+st.write("### Interactive Pivot Table")
+grid_options_builder = GridOptionsBuilder.from_dataframe(pivot_table)
+grid_options_builder.configure_pagination(paginationAutoPageSize=True)
+grid_options_builder.configure_default_column(editable=True, groupable=True)
+grid_options = grid_options_builder.build()
+
+AgGrid(
+    pivot_table,
+    gridOptions=grid_options,
+    enable_enterprise_modules=True,
+    allow_unsafe_jscode=True,
+    theme="streamlit",
 )
 
-# Display the data as an Altair chart using `st.altair_chart`.
-df_chart = pd.melt(
-    df_reshaped.reset_index(), id_vars="year", var_name="genre", value_name="gross"
+# Add a download button for the pivot table
+st.write("### Download Data")
+csv_data = pivot_table.to_csv(index=False)
+st.download_button(
+    label="Download as CSV",
+    data=csv_data,
+    file_name="pivot_table.csv",
+    mime="text/csv",
 )
-chart = (
-    alt.Chart(df_chart)
-    .mark_line()
-    .encode(
-        x=alt.X("year:N", title="Year"),
-        y=alt.Y("gross:Q", title="Gross earnings ($)"),
-        color="genre:N",
-    )
-    .properties(height=320)
-)
-st.altair_chart(chart, use_container_width=True)
